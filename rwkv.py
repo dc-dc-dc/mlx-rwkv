@@ -1,6 +1,8 @@
 import mlx.core as mx
 import mlx.nn as nn
 from dataclasses import dataclass
+import json
+import glob
 
 @dataclass
 class RWKVConfig:
@@ -12,7 +14,6 @@ class RWKVConfig:
     n_head = 32
     head_size = 64
     head_size_divisor = 8
-
 
 class RWKVChannelMix(nn.Module):
     def __init__(self, config: RWKVConfig):
@@ -40,8 +41,8 @@ class RWKVTimeMix(nn.Module):
         self.time_mix_r = mx.zeros((1, 1, config.n_embd))
         self.time_mix_g = mx.zeros((1, 1, config.n_embd))
         
-        self.time_decay = mx.zeros(config.n_head, config.head_size)
-        self.time_faaa = mx.zeros(config.n_head, config.head_size)
+        self.time_decay = mx.zeros((config.n_head, config.head_size))
+        self.time_faaa = mx.zeros((config.n_head, config.head_size))
         
         self.receptance = nn.Linear(config.n_embd, config.dim_att, bias=False)
         self.key = nn.Linear(config.n_embd, config.dim_att, bias=False)
@@ -97,18 +98,40 @@ class Block(nn.Module):
 
 class RWKV(nn.Module):
     def __init__(self, config: RWKVConfig):
-        self.emb = nn.Embedding(config)
+        self.emb = nn.Embedding(config.vocab_size, config.n_embd)
         self.blocks = [Block(i, config) for i in range(config.n_layer)]
         self.ln_out = nn.LayerNorm(config.n_embd)
         self.head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.ln0 = nn.LayerNorm(config.n_embd)
         self.state = [None] * config.n_layer * 3
         for i in range(config.n_layer):
             self.state[i*3+0] = mx.zeros(config.n_embd)
-            self.state[i*3+1] = mx.zeros((config.n_head, config.n_att // config.n_head, config.n_att // config.n_head))
+            self.state[i*3+1] = mx.zeros((config.n_head, config.dim_att // config.n_head, config.dim_att // config.n_head))
             self.state[i*3+2] = mx.zeros(config.n_embd)
 
-    def load_weights(self, path: str):
-        pass
+    @classmethod
+    def load_weights(cls, path: str):
+        model_args = RWKVConfig()
+        with open(f"{path}/config.json", "r") as f:
+            config = json.loads(f.read())
+            model_args.dim_att = config["attention_hidden_size"]
+            model_args.head_size = config["head_size"]
+            model_args.n_layer = config["num_hidden_layers"]
+            model_args.vocab_size = config["vocab_size"]
+            model_args.n_embd = config["hidden_size"]
+
+        res = RWKV(model_args)
+        weight_files = glob.glob(f"{path}/*.safetensors")
+        if len(weight_files) != 1:
+            raise ValueError(f"No weight files found in {path}")
+        weight = mx.load(weight_files[0])
+        for k, v in weight.items():
+            if k.startswith("blocks.0.ln0"):
+                k.replace("blocks.0.ln0", "ln0")
+                setattr(res, k, v)
+            else:
+                setattr(res, k, v)
+        return res
 
     def __call__(self, x: mx.array):
         x = self.emb(x)
@@ -117,3 +140,6 @@ class RWKV(nn.Module):
             x, self.state[i*3+0], self.state[i*3+1] = block(x, self.state[i*3+0], self.state[i*3+1])
         x = self.ln_out(x)
         return self.head(x)
+    
+if __name__ == "__main__":
+    model = RWKV.load_weights("./rwkv5-world-1b")
