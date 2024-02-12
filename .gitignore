@@ -1,4 +1,5 @@
 *.safetensors
 *.pth
 
+__pycache__/
 rwkv5-world-1b/
