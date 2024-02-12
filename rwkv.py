@@ -1,5 +1,6 @@
 import mlx.core as mx
 import mlx.nn as nn
+import numpy as np
 from dataclasses import dataclass
 import json
 import glob
@@ -15,6 +16,15 @@ class RWKVConfig:
     head_size = 64
     head_size_divisor = 8
 
+# TODO: Add roll support to mlx to avoid this conversion
+def time_shift(x: mx.array):
+    tx = np.array(x.astype(mx.float32))
+    cn = np.roll(tx, 1, axis=x.ndim-2)
+    mask = np.ones(tx.shape[-1])
+    mask[0] = 0
+    mask = np.expand_dims(mask, mask.ndim)
+    return mx.array(cn * mask).astype(x.dtype)
+
 class RWKVChannelMix(nn.Module):
     def __init__(self, config: RWKVConfig):
         self.time_mix_k = mx.zeros((1, 1, config.n_embd))
@@ -24,7 +34,7 @@ class RWKVChannelMix(nn.Module):
         self.value = nn.Linear(config.dim_ffn, config.n_embd, bias=False)
     
     def __call__(self, x:mx.array):
-        xx = x.pad((0, 0, 1, -1))
+        xx = time_shift(x) # x.pad((0, 0, 1, -1))
         xk = x * self.time_mix_k + xx * (1 - self.time_mix_k)
         xr = x * self.time_mix_r + xx * (1 - self.time_mix_r)
         k = self.key(xk)
@@ -55,8 +65,9 @@ class RWKVTimeMix(nn.Module):
         # _N_ = head_size
         B, T, C = x.shape
         H = self.n_head
-
-        xx = x.pad((0, 0, 1, -1))
+        # add a row of zeros to the top and remove the last row
+        # this is essentially a shift down. mlx does not support negative pad
+        xx = time_shift(x) # x.pad((0, 0, 1, -1))
         xk = x * self.time_mix_k + xx * (1 - self.time_mix_k)
         xv = x * self.time_mix_v + xx * (1 - self.time_mix_v)
         xr = x * self.time_mix_r + xx * (1 - self.time_mix_r)
